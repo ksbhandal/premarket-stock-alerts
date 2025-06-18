@@ -1,77 +1,92 @@
-import time
+import os
 import requests
-import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
+from datetime import datetime, timedelta
+import pytz
 
-# Telegram Bot Config
-bot_token = os.environ.get('bot_token')
-chat_id = os.environ.get('chat_id')
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+FINNHUB_API_KEY = os.getenv("API_KEY")
 
-# Chrome Driver Setup
-chrome_options = Options()
-chrome_options.add_argument('--headless')
-chrome_options.add_argument('--disable-gpu')
-chrome_options.add_argument('--no-sandbox')
+PREVIOUS_SYMBOLS = set()
 
-# Set your path to chromedriver
-service = Service('C:/Users/kamal/chromedriver/chromedriver.exe')
-driver = webdriver.Chrome(service=service, options=chrome_options)
+def get_us_stocks():
+    url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_API_KEY}"
+    res = requests.get(url)
+    return res.json()
 
-# Screener URL (Premarket Penny Stocks)
-driver.get("https://www.tradingview.com/screener/")
-time.sleep(8)
+def get_quote(symbol):
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
+    res = requests.get(url)
+    return res.json()
 
-# Expand columns (optional if custom view is saved)
-try:
-    driver.find_element(By.XPATH, '//button[contains(text(),"Customize columns")]').click()
-    time.sleep(2)
-except:
-    pass  # columns may already be visible
+def get_metrics(symbol):
+    url = f"https://finnhub.io/api/v1/stock/metric?symbol={symbol}&metric=all&token={FINNHUB_API_KEY}"
+    res = requests.get(url)
+    return res.json()
 
-# Grab table
-rows = driver.find_elements(By.XPATH, '//div[@data-widget="screener-table"]//tbody/tr')
-stocks = []
-for row in rows:
-    try:
-        cols = row.find_elements(By.TAG_NAME, 'td')
-        if len(cols) < 10:
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": msg}
+    requests.post(url, data=data)
+
+def run_screener():
+    global PREVIOUS_SYMBOLS
+    timezone = pytz.timezone("US/Eastern")
+    now = datetime.now(timezone)
+
+    stock_list = get_us_stocks()
+    selected = []
+    current_symbols = set()
+
+    for stock in stock_list:
+        symbol = stock.get("symbol", "")
+        if "." in symbol:  # Skip weird symbols like BRK.A
             continue
 
-        symbol = cols[0].text
-        premarket_change = cols[2].text
-        premarket_gap = cols[3].text
-        premarket_volume = cols[4].text
-        price = cols[5].text
-        change = cols[6].text
-        gap = cols[7].text
-        volume = cols[8].text
-        vol_change = cols[9].text
-        relvol_15m = cols[10].text if len(cols) > 10 else 'N/A'
-        relvol_5m = cols[11].text if len(cols) > 11 else 'N/A'
+        try:
+            quote = get_quote(symbol)
+            metric = get_metrics(symbol)
 
-        # Custom filter logic
-        if relvol_15m != 'N/A' and float(relvol_15m) >= 2:
-            message = (
-                f"🚀 [Premarket Alert] {symbol}\n"
-                f"Price: ${price}\n"
-                f"PreMkt Chg: {premarket_change}\n"
-                f"Gap: {premarket_gap}\n"
-                f"Vol: {volume}\n"
-                f"RelVol 15m: {relvol_15m}\n"
-                f"RelVol 5m: {relvol_5m}"
+            price = quote.get("c")
+            pc = quote.get("pc")
+            vol = quote.get("v")
+            market_cap = metric.get("metric", {}).get("marketCapitalization", 0)
+
+            if not all([price, pc, vol]):
+                continue
+
+            price_change = ((price - pc) / pc) * 100 if pc > 0 else 0
+
+            if price < 5 and price_change > 10 and vol > 100_000 and market_cap < 300:
+                selected.append((symbol, price, price_change, vol, market_cap))
+                current_symbols.add(symbol)
+
+                if symbol not in PREVIOUS_SYMBOLS:
+                    msg = (
+                        f"🚨 New Penny Stock Alert 🚨\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: ${price:.2f}\n"
+                        f"Change: {price_change:.2f}%\n"
+                        f"Volume: {vol:,}\n"
+                        f"Market Cap: ${market_cap:.1f}M"
+                    )
+                    send_telegram(msg)
+
+        except Exception as e:
+            continue
+
+    # Hourly update
+    if now.minute % 60 == 0:
+        if selected:
+            full = "\n\n".join(
+                f"{s[0]}: ${s[1]:.2f} | {s[2]:.2f}% | Vol: {s[3]:,} | MC: ${s[4]:.1f}M"
+                for s in selected
             )
-            stocks.append(message)
-    except:
-        continue
+            send_telegram(f"📊 Hourly Update ({now.strftime('%I:%M %p')} EST):\n\n{full}")
+        else:
+            send_telegram(f"📊 Hourly Update ({now.strftime('%I:%M %p')} EST): No stocks matched.")
 
-# Send Alerts via Telegram
-for stock_msg in stocks:
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": stock_msg}
-    requests.get(url, params=payload)
+    PREVIOUS_SYMBOLS = current_symbols
 
-print(f"✅ Sent {len(stocks)} premarket stock alerts.")
-driver.quit()
+if __name__ == "__main__":
+    run_screener()
