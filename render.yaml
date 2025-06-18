@@ -5,4 +5,4 @@ services:
     schedule: "*/10 4-8 * * *"
     timezone: America/New_York
     buildCommand: ""
-    startCommand: "python main.py"
+    startCommand: "python premarket_alert.py"
