@@ -22,7 +22,6 @@ def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
     requests.post(url, data=data)
-send_telegram("✅ TEST: Render web service is LIVE and connected to Telegram.")
 
 def get_us_stocks():
     url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_API_KEY}"
@@ -102,4 +101,3 @@ threading.Thread(target=background_loop, daemon=True).start()
 # Start Flask app to keep port open
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-test: telegram connection from Render
