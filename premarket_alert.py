@@ -6,25 +6,26 @@ from datetime import datetime
 import pytz
 from flask import Flask
 
-# Load environment variables
+# Environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("API_KEY")
+APP_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 app = Flask(__name__)
 PREVIOUS_SYMBOLS = set()
-LAST_HOURLY_SENT = -1  # Tracks hour of last summary
+LAST_HOURLY_SENT = -1
 
 @app.route('/')
 def home():
-    return "✅ Pre-Market Screener is live and monitoring..."
+    return "✅ Pre-Market Screener is awake."
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
     try:
         response = requests.post(url, data=data)
-        print("🔁 Telegram:", response.status_code, response.text)
+        print("📨 Telegram:", response.status_code, response.text)
     except Exception as e:
         print("❌ Telegram error:", str(e))
 
@@ -42,13 +43,11 @@ def get_metrics(symbol):
 
 def run_screener():
     global PREVIOUS_SYMBOLS, LAST_HOURLY_SENT
-
     now = datetime.now(pytz.timezone("US/Eastern"))
-    current_hour = now.hour
-    current_minute = now.minute
+    hour, minute = now.hour, now.minute
 
-    if not (4 <= current_hour < 9):
-        print(f"⏱ Outside trading window (now: {now.strftime('%I:%M %p EST')}). Sleeping.")
+    if not (4 <= hour < 9):
+        print(f"⏱ Outside premarket hours ({now.strftime('%I:%M %p EST')}). Skipping.")
         return
 
     try:
@@ -79,7 +78,7 @@ def run_screener():
 
                 if symbol not in PREVIOUS_SYMBOLS:
                     send_telegram(
-                        f"🚀 New Alert\n"
+                        f"🚀 Premarket Alert\n"
                         f"Symbol: {symbol}\n"
                         f"Price: ${price:.2f}\n"
                         f"Change: {change:.2f}%\n"
@@ -87,18 +86,17 @@ def run_screener():
                         f"Market Cap: ${mcap:.1f}M"
                     )
 
-        # Send hourly summary only once per hour
-        if current_minute < 10 and current_hour != LAST_HOURLY_SENT:
+        if minute < 10 and hour != LAST_HOURLY_SENT:
             if selected:
                 summary = "\n\n".join(
                     f"{s[0]}: ${s[1]:.2f} | {s[2]:.1f}% | Vol: {s[3]:,} | MC: ${s[4]:.1f}M"
                     for s in selected
                 )
-                send_telegram(f"📊 Hourly Summary ({now.strftime('%I:%M %p')} EST):\n\n{summary}")
+                send_telegram(f"📊 Premarket Summary ({now.strftime('%I:%M %p')} EST):\n\n{summary}")
             else:
-                send_telegram(f"📊 Hourly Summary ({now.strftime('%I:%M %p')} EST): No matches.")
+                send_telegram(f"📊 Premarket Summary ({now.strftime('%I:%M %p')} EST): No matches.")
 
-            LAST_HOURLY_SENT = current_hour
+            LAST_HOURLY_SENT = hour
 
         PREVIOUS_SYMBOLS = current_symbols
 
@@ -110,9 +108,20 @@ def background_loop():
         run_screener()
         time.sleep(600)  # every 10 minutes
 
-# Launch background screener thread
-threading.Thread(target=background_loop, daemon=True).start()
+def ping_self_loop():
+    while True:
+        try:
+            if APP_URL:
+                print("🔁 Pinging self to stay alive...")
+                requests.get(APP_URL)
+        except Exception as e:
+            print("❌ Self-ping failed:", str(e))
+        time.sleep(840)  # every 14 minutes
 
-# Run Flask to keep Render web service alive
+# Start background threads
+threading.Thread(target=background_loop, daemon=True).start()
+threading.Thread(target=ping_self_loop, daemon=True).start()
+
+# Keep Flask server live
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
