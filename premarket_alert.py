@@ -1,14 +1,14 @@
 import time
 import requests
-import pandas as pd
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 
-# Telegram Bot Config
-bot_token = '7980971619:AAGTY_OOc3JzT5o8STzBW94dnMIEQolriXg'
-chat_id = '6949345499'
+# Telegram Bot Config (loaded from environment variables)
+bot_token = os.environ.get('bot_token')
+chat_id = os.environ.get('chat_id')
 
 # Chrome Driver Setup
 chrome_options = Options()
