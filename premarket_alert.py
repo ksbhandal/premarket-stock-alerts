@@ -23,9 +23,13 @@ def send_telegram(msg):
     data = {"chat_id": CHAT_ID, "text": msg}
     try:
         response = requests.post(url, data=data)
-        print("Telegram Response:", response.status_code, response.text)
+        print("🔁 Telegram response:", response.status_code, response.text)
     except Exception as e:
-        print("Telegram Error:", str(e))
+        print("❌ Telegram error:", str(e))
+
+# ✅ Test Telegram from Render
+send_telegram("✅ TEST: Render server is connected to Telegram.")
+
 
 
 def get_us_stocks():
