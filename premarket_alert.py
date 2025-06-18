@@ -21,7 +21,12 @@ def home():
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
-    requests.post(url, data=data)
+    try:
+        response = requests.post(url, data=data)
+        print("Telegram Response:", response.status_code, response.text)
+    except Exception as e:
+        print("Telegram Error:", str(e))
+
 
 def get_us_stocks():
     url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_API_KEY}"
