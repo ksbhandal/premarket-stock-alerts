@@ -1,30 +1,31 @@
 import os
 import requests
-import threading
-import time
 from datetime import datetime
 import pytz
 from flask import Flask
 
-# Environment variables
+# ENV variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_API_KEY = os.getenv("API_KEY")
-APP_URL = os.getenv("RENDER_EXTERNAL_URL")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
 app = Flask(__name__)
-PREVIOUS_SYMBOLS = set()
-LAST_HOURLY_SENT = -1
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "✅ Pre-Market Screener is awake."
+    return "✅ Pre-market screener is running."
+
+@app.route("/scan")
+def run_scan():
+    send_telegram("🔄 Pre-market scan triggered.")
+    run_screener()
+    return "✅ Pre-market scan completed."
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg}
+    payload = {"chat_id": CHAT_ID, "text": msg}
     try:
-        response = requests.post(url, data=data)
+        response = requests.post(url, data=payload)
         print("📨 Telegram:", response.status_code, response.text)
     except Exception as e:
         print("❌ Telegram error:", str(e))
@@ -42,86 +43,61 @@ def get_metrics(symbol):
     return requests.get(url).json()
 
 def run_screener():
-    global PREVIOUS_SYMBOLS, LAST_HOURLY_SENT
     now = datetime.now(pytz.timezone("US/Eastern"))
-    hour, minute = now.hour, now.minute
+    print(f"⏱ Scan triggered at {now.strftime('%Y-%m-%d %I:%M:%S %p EST')}")
 
-    if not (4 <= hour < 9):
-        print(f"⏱ Outside premarket hours ({now.strftime('%I:%M %p EST')}). Skipping.")
+    if not (4 <= now.hour < 9 or (now.hour == 9 and now.minute <= 0)):
+        print("⚠️ Outside pre-market hours, skipping scan.")
         return
 
     try:
         stock_list = get_us_stocks()
-        selected = []
-        current_symbols = set()
+        print(f"📦 Retrieved {len(stock_list)} symbols from Finnhub.")
+    except Exception as e:
+        print("❌ Failed to fetch stock list:", e)
+        send_telegram("❌ ERROR: Could not fetch stock list.")
+        return
 
-        for stock in stock_list:
-            symbol = stock.get("symbol", "")
-            if "." in symbol:
-                continue
+    matches = 0
 
+    for stock in stock_list:
+        symbol = stock.get("symbol", "")
+        if "." in symbol:
+            continue
+
+        try:
             quote = get_quote(symbol)
             metric = get_metrics(symbol)
+
             price = quote.get("c")
             pc = quote.get("pc")
             vol = quote.get("v")
             mcap = metric.get("metric", {}).get("marketCapitalization", 0)
 
             if not all([price, pc, vol]):
+                print(f"⚠️ Skipped {symbol}: Missing price/vol.")
                 continue
 
             change = ((price - pc) / pc) * 100 if pc > 0 else 0
 
             if price < 5 and change > 10 and vol > 100_000 and mcap < 300:
-                current_symbols.add(symbol)
-                selected.append((symbol, price, change, vol, mcap))
-
-                if symbol not in PREVIOUS_SYMBOLS:
-                    send_telegram(
-                        f"🚀 Premarket Alert\n"
-                        f"Symbol: {symbol}\n"
-                        f"Price: ${price:.2f}\n"
-                        f"Change: {change:.2f}%\n"
-                        f"Volume: {vol:,}\n"
-                        f"Market Cap: ${mcap:.1f}M"
-                    )
-
-        if minute < 10 and hour != LAST_HOURLY_SENT:
-            if selected:
-                summary = "\n\n".join(
-                    f"{s[0]}: ${s[1]:.2f} | {s[2]:.1f}% | Vol: {s[3]:,} | MC: ${s[4]:.1f}M"
-                    for s in selected
+                print(f"🚀 Match: {symbol} | ${price:.2f} | {change:.2f}% | Vol: {vol:,}")
+                send_telegram(
+                    f"🚀 Pre-market Alert\n"
+                    f"Symbol: {symbol}\n"
+                    f"Price: ${price:.2f}\n"
+                    f"% Change: {change:.2f}%\n"
+                    f"Volume: {vol:,}\n"
+                    f"Market Cap: ${mcap:.1f}M"
                 )
-                send_telegram(f"📊 Premarket Summary ({now.strftime('%I:%M %p')} EST):\n\n{summary}")
-            else:
-                send_telegram(f"📊 Premarket Summary ({now.strftime('%I:%M %p')} EST): No matches.")
-
-            LAST_HOURLY_SENT = hour
-
-        PREVIOUS_SYMBOLS = current_symbols
-
-    except Exception as e:
-        print("❌ Screener error:", str(e))
-
-def background_loop():
-    while True:
-        run_screener()
-        time.sleep(600)  # every 10 minutes
-
-def ping_self_loop():
-    while True:
-        try:
-            if APP_URL:
-                print("🔁 Pinging self to stay alive...")
-                requests.get(APP_URL)
+                matches += 1
         except Exception as e:
-            print("❌ Self-ping failed:", str(e))
-        time.sleep(840)  # every 14 minutes
+            print(f"❌ Error for {symbol}:", str(e))
 
-# Start background threads
-threading.Thread(target=background_loop, daemon=True).start()
-threading.Thread(target=ping_self_loop, daemon=True).start()
+    if matches == 0:
+        send_telegram("🔍 Scan complete — no stocks matched pre-market criteria.")
+    else:
+        print(f"✅ Scan complete. {matches} stocks matched.")
 
-# Keep Flask server live
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
