@@ -1,18 +1,8 @@
 services:
-  - type: worker
-    name: premarket-alert
+  - type: cron
+    name: premarket-stock-alerts
     env: python
-    repo: https://github.com/ksbhandal/premarket-stock-alerts
-    branch: main
-    buildCommand: |
-      apt-get update
-      apt-get install -y wget gnupg unzip curl
-      curl -sSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor | tee /usr/share/keyrings/google.gpg > /dev/null
-      echo "deb [signed-by=/usr/share/keyrings/google.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | tee /etc/apt/sources.list.d/google-chrome.list
-      apt-get update
-      apt-get install -y google-chrome-stable
-      pip install -r requirements.txt
-    startCommand: python premarket_alert.py
-    envVars:
-      - key: GOOGLE_CHROME_BIN
-        value: /usr/bin/google-chrome
+    schedule: "*/10 4-8 * * *"
+    timezone: America/New_York
+    buildCommand: ""
+    startCommand: "python main.py"
