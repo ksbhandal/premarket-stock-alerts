@@ -6,31 +6,27 @@ from datetime import datetime
 import pytz
 from flask import Flask
 
+# Load environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("API_KEY")
 
-PREVIOUS_SYMBOLS = set()
-
 app = Flask(__name__)
+PREVIOUS_SYMBOLS = set()
+LAST_HOURLY_SENT = -1  # Tracks hour of last summary
 
 @app.route('/')
 def home():
-    return "✅ Penny Stock Screener is running on Render!"
+    return "✅ Pre-Market Screener is live and monitoring..."
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
     try:
         response = requests.post(url, data=data)
-        print("🔁 Telegram response:", response.status_code, response.text)
+        print("🔁 Telegram:", response.status_code, response.text)
     except Exception as e:
         print("❌ Telegram error:", str(e))
-
-# ✅ Test Telegram from Render
-send_telegram("✅ TEST: Render server is connected to Telegram.")
-
-
 
 def get_us_stocks():
     url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_API_KEY}"
@@ -45,11 +41,20 @@ def get_metrics(symbol):
     return requests.get(url).json()
 
 def run_screener():
-    global PREVIOUS_SYMBOLS
+    global PREVIOUS_SYMBOLS, LAST_HOURLY_SENT
+
+    now = datetime.now(pytz.timezone("US/Eastern"))
+    current_hour = now.hour
+    current_minute = now.minute
+
+    if not (4 <= current_hour < 9):
+        print(f"⏱ Outside trading window (now: {now.strftime('%I:%M %p EST')}). Sleeping.")
+        return
+
     try:
         stock_list = get_us_stocks()
-        current_symbols = set()
         selected = []
+        current_symbols = set()
 
         for stock in stock_list:
             symbol = stock.get("symbol", "")
@@ -70,43 +75,44 @@ def run_screener():
 
             if price < 5 and change > 10 and vol > 100_000 and mcap < 300:
                 current_symbols.add(symbol)
-                if symbol not in PREVIOUS_SYMBOLS:
-                    send_telegram(
-                        f"🚨 New Stock Alert 🚨\nSymbol: {symbol}\nPrice: ${price:.2f}\nChange: {change:.2f}%\nVolume: {vol:,}\nMarket Cap: ${mcap:.1f}M"
-                    )
                 selected.append((symbol, price, change, vol, mcap))
 
-        # Hourly update
-        now = datetime.now(pytz.timezone("US/Eastern"))
-        if now.minute < 10:
+                if symbol not in PREVIOUS_SYMBOLS:
+                    send_telegram(
+                        f"🚀 New Alert\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: ${price:.2f}\n"
+                        f"Change: {change:.2f}%\n"
+                        f"Volume: {vol:,}\n"
+                        f"Market Cap: ${mcap:.1f}M"
+                    )
+
+        # Send hourly summary only once per hour
+        if current_minute < 10 and current_hour != LAST_HOURLY_SENT:
             if selected:
-                msg = "\n\n".join(
+                summary = "\n\n".join(
                     f"{s[0]}: ${s[1]:.2f} | {s[2]:.1f}% | Vol: {s[3]:,} | MC: ${s[4]:.1f}M"
                     for s in selected
                 )
-                send_telegram(f"📊 Hourly Update ({now.strftime('%I:%M %p')} EST):\n\n{msg}")
+                send_telegram(f"📊 Hourly Summary ({now.strftime('%I:%M %p')} EST):\n\n{summary}")
             else:
-                send_telegram(f"📊 Hourly Update ({now.strftime('%I:%M %p')} EST): No matching stocks.")
+                send_telegram(f"📊 Hourly Summary ({now.strftime('%I:%M %p')} EST): No matches.")
 
-        PREVIOUS_SYMBOLS.clear()
-        PREVIOUS_SYMBOLS.update(current_symbols)
+            LAST_HOURLY_SENT = current_hour
+
+        PREVIOUS_SYMBOLS = current_symbols
 
     except Exception as e:
-        print("Error:", str(e))
-
+        print("❌ Screener error:", str(e))
 
 def background_loop():
     while True:
-        now = datetime.now(pytz.timezone("US/Eastern"))
-        if 4 <= now.hour < 9:
-            run_screener()
-        else:
-            print("Outside trading hours, sleeping longer...")
-        time.sleep(600)  # Run every 10 minutes
+        run_screener()
+        time.sleep(600)  # every 10 minutes
 
-# Start background thread
+# Launch background screener thread
 threading.Thread(target=background_loop, daemon=True).start()
 
-# Start Flask app to keep port open
+# Run Flask to keep Render web service alive
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
