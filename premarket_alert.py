@@ -102,3 +102,4 @@ threading.Thread(target=background_loop, daemon=True).start()
 # Start Flask app to keep port open
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+test: telegram connection from Render
