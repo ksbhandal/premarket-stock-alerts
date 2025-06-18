@@ -1,8 +1,7 @@
 services:
-  - type: cron
-    name: premarket-stock-alerts
+  - type: web
+    name: PennyStockScreenerWeb
     env: python
-    schedule: "*/10 4-8 * * *"
-    timezone: America/New_York
     buildCommand: ""
     startCommand: "python premarket_alert.py"
+    plan: free
