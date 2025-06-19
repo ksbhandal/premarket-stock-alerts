@@ -112,15 +112,13 @@ def scan_and_alert():
 
         last_seen_change[symbol] = percent_change
 
-        msg = (f"🔥 ${symbol} ALERT @ {now_str}
-"
-               f"Price: ${price:.2f} | Prev Close: ${prev_close:.2f}
-"
-               f"Change: {percent_change:.1f}%{change_diff}
-"
-               f"Volume: {volume:,} | Rel Vol: {rel_vol:.2f}
-"
-               f"Market Cap: ${cap:.0f}M")
+        msg = (
+    f"🔥 ${symbol} ALERT @ {now_str}\n"
+    f"Price: ${price:.2f} | Prev Close: ${prev_close:.2f}\n"
+    f"Change: {percent_change:.1f}%{change_diff}\n"
+    f"Volume: {volume:,} | Rel Vol: {rel_vol:.2f}\n"
+    f"Market Cap: ${cap:.0f}M"
+)
 
         found_stocks.append(msg)
 
