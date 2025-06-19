@@ -1,128 +1,111 @@
 import os
+import time
 import requests
+import pytz
 from datetime import datetime
 from flask import Flask
-import pytz
-import time
+from threading import Thread
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("bot_token")
-CHAT_ID = os.environ.get("chat_id")
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
+# === Configuration ===
+API_KEY = os.getenv("FINNHUB_API_KEY")
+BOT_TOKEN = os.getenv("bot_token")
+CHAT_ID = os.getenv("chat_id")
 
-HEADERS = {
-    "X-Finnhub-Token": FINNHUB_API_KEY
-}
-
-EXCHANGES = ["US"]
-PRICE_LIMIT = 5.00
-GAP_PERCENT = 20
-VOLUME_MIN = 100000
-REL_VOL_MIN = 2
-TIMEZONE = pytz.timezone("US/Eastern")
-SCAN_HOURS = range(4, 9)  # 4 AM to 8:59 AM EST
-
-last_alerted = set()
-
-
-def is_premarket():
-    now = datetime.now(TIMEZONE)
-    return now.hour in SCAN_HOURS
-
-
-def fetch_stocks():
-    url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_API_KEY}"
-    res = requests.get(url)
-    if res.status_code == 200:
-        return [s['symbol'] for s in res.json() if s.get("type") == "Common Stock"]
-    return []
-
-
-def get_metrics(symbol):
-    try:
-        quote = requests.get(f"https://finnhub.io/api/v1/quote?symbol={symbol}", headers=HEADERS).json()
-        profile = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}", headers=HEADERS).json()
-        stats = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={symbol}&metric=all", headers=HEADERS).json()
-
-        return {
-            "symbol": symbol,
-            "current_price": quote.get("c"),
-            "previous_close": quote.get("pc"),
-            "market_cap": profile.get("marketCapitalization"),
-            "volume": quote.get("v"),
-            "rel_vol": stats.get("metric", {}).get("relativeVolume")
-        }
-    except:
-        return None
-
-
-def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text}
-    try:
-        requests.post(url, data=data)
-    except:
-        pass
-
-
+# === Scanner Logic ===
 def scan_and_alert():
-    if not is_premarket():
+    est = pytz.timezone('US/Eastern')
+    now = datetime.now(est)
+
+    # Run only during premarket (4:00 AM to 8:59 AM EST)
+    if now.hour < 4 or now.hour >= 9:
+        print("Outside premarket hours (4:00 AM to 9:00 AM EST). Skipping scan.")
         return
 
-    send_telegram_message("\ud83d\udd0d Pre-market scan triggered.")
-    symbols = fetch_stocks()
-    for symbol in symbols:
-        if symbol in last_alerted:
+    print("\n[INFO] Pre-market scan triggered at:", now.strftime("%Y-%m-%d %H:%M:%S"))
+
+    url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={API_KEY}"
+    try:
+        response = requests.get(url)
+        symbols = response.json()
+    except Exception as e:
+        print("[ERROR] Failed to fetch symbols:", e)
+        return
+
+    alerts = []
+    for stock in symbols:
+        try:
+            symbol = stock['symbol']
+
+            # Basic filter: penny stocks under $5
+            quote_url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={API_KEY}"
+            q = requests.get(quote_url).json()
+
+            c = q.get("c")   # current price
+            pc = q.get("pc") # previous close
+            v = q.get("v")   # volume
+
+            if not all([c, pc, v]) or c > 5:
+                continue
+
+            # Filter: 20%+ premarket gain
+            percent_change = ((c - pc) / pc) * 100 if pc else 0
+            if percent_change < 20:
+                continue
+
+            # Filter: volume > 100K
+            if v < 100_000:
+                continue
+
+            # Filter: market cap < 300M
+            profile_url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={API_KEY}"
+            p = requests.get(profile_url).json()
+            market_cap = p.get("marketCapitalization", 9999)
+            if market_cap > 300:
+                continue
+
+            # Relative volume (optional)
+            metrics_url = f"https://finnhub.io/api/v1/stock/metric?symbol={symbol}&metric=all&token={API_KEY}"
+            m = requests.get(metrics_url).json()
+            rel_vol = m.get("metric", {}).get("relativeVolume", 0)
+            if rel_vol < 2:
+                continue
+
+            alert_msg = f"\U0001F680 ${symbol} up {percent_change:.1f}% | Price: ${c:.2f} | Vol: {v:,} | RelVol: {rel_vol:.2f}"
+            alerts.append(alert_msg)
+        except:
             continue
 
-        metrics = get_metrics(symbol)
-        if not metrics:
-            continue
+    if alerts:
+        message = "\n".join(alerts)
+    else:
+        message = "\U0001F504 Pre-market scan triggered."
 
-        price = metrics["current_price"]
-        prev_close = metrics["previous_close"]
-        cap = metrics["market_cap"]
-        volume = metrics["volume"]
-        rel_vol = metrics["rel_vol"]
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": message}
+        )
+    except Exception as e:
+        print("[ERROR] Telegram failed:", e)
 
-        if not all([price, prev_close, cap, volume, rel_vol]):
-            continue
-
-        if price > PRICE_LIMIT:
-            continue
-
-        percent_change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
-        if percent_change < GAP_PERCENT:
-            continue
-
-        if volume < VOLUME_MIN:
-            continue
-
-        if rel_vol < REL_VOL_MIN:
-            continue
-
-        last_alerted.add(symbol)
-
-        msg = (f"\ud83d\udd25 ${symbol} ALERT!\n"
-               f"Price: ${price:.2f} | Prev Close: ${prev_close:.2f}\n"
-               f"Change: {percent_change:.1f}%\n"
-               f"Volume: {volume:,} | Rel Vol: {rel_vol:.2f}\n"
-               f"Market Cap: ${cap:.0f}M")
-
-        send_telegram_message(msg)
-
-
-@app.route("/")
+# === Self-pinging route for UptimeRobot ===
+@app.route('/')
 def home():
-    return "Pre-market scanner online."
+    return "Pre-market Screener Running"
 
-
-@app.route("/scan")
-def scan():
+@app.route('/scan')
+def manual_scan():
     scan_and_alert()
-    return "Scan completed."
+    return "Scan triggered"
 
+# === Start Scheduled Scanning Thread ===
+def schedule_loop():
+    while True:
+        scan_and_alert()
+        time.sleep(600)  # 10 minutes
 
 if __name__ == '__main__':
+    Thread(target=schedule_loop).start()
     app.run(host="0.0.0.0", port=10000)
