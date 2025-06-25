@@ -1,152 +1,71 @@
-import os
 import requests
-from datetime import datetime
-from flask import Flask
-import pytz
+from bs4 import BeautifulSoup
+import re
 import time
-import threading
+import datetime
+import pytz
+import os
 
-app = Flask(__name__)
-
+# Telegram Bot Config (use Render Environment Variables)
 BOT_TOKEN = os.environ.get("bot_token")
 CHAT_ID = os.environ.get("chat_id")
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
-HEADERS = {
-    "X-Finnhub-Token": FINNHUB_API_KEY
-}
+# Constants
+URL = "https://www.tradingview.com/markets/stocks-usa/market-movers-pre-market-gainers/"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-EXCHANGES = ["US"]
-PRICE_LIMIT = 5.00
-GAP_PERCENT = 20
-VOLUME_MIN = 100000
-REL_VOL_MIN = 2
-TIMEZONE = pytz.timezone("US/Eastern")
-SCAN_HOURS = range(4, 9)  # 4 AM to 8:59 AM EST
+# EST Timezone
+eastern = pytz.timezone("US/Eastern")
 
-# To store last known %change per stock
-last_seen_change = {}
-
-
-def is_premarket():
-    now = datetime.now(TIMEZONE)
-    return now.hour in SCAN_HOURS
-
-
-def fetch_stocks():
-    url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_API_KEY}"
-    res = requests.get(url)
-    if res.status_code == 200:
-        return [s['symbol'] for s in res.json() if s.get("type") == "Common Stock"]
-    return []
-
-
-def get_metrics(symbol):
-    try:
-        quote = requests.get(f"https://finnhub.io/api/v1/quote?symbol={symbol}", headers=HEADERS).json()
-        profile = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}", headers=HEADERS).json()
-        stats = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={symbol}&metric=all", headers=HEADERS).json()
-
-        return {
-            "symbol": symbol,
-            "current_price": quote.get("c"),
-            "previous_close": quote.get("pc"),
-            "market_cap": profile.get("marketCapitalization"),
-            "volume": quote.get("v"),
-            "rel_vol": stats.get("metric", {}).get("relativeVolume")
-        }
-    except:
-        return None
-
-
-def send_telegram_message(text):
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text}
+    data = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}
     try:
         requests.post(url, data=data)
-    except:
-        pass
+    except Exception as e:
+        print("Telegram Error:", e)
 
+def scrape_tradingview():
+    try:
+        response = requests.get(URL, headers=HEADERS)
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = soup.find("table")
+        if not table:
+            send_telegram("[ERROR] Screener content not found.")
+            return
 
-def scan_and_alert():
-    if not is_premarket():
-        return
+        rows = table.find("tbody").find_all("tr")
+        results = []
 
-    now_str = datetime.now(TIMEZONE).strftime("%I:%M %p EST")
-    symbols = fetch_stocks()
-    found_stocks = []
-
-    for symbol in symbols:
-        metrics = get_metrics(symbol)
-        if not metrics:
-            continue
-
-        price = metrics["current_price"]
-        prev_close = metrics["previous_close"]
-        cap = metrics["market_cap"]
-        volume = metrics["volume"]
-        rel_vol = metrics["rel_vol"]
-
-        if not all([price, prev_close, cap, volume, rel_vol]):
-            continue
-
-        if price > PRICE_LIMIT:
-            continue
-
-        percent_change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
-        if percent_change < GAP_PERCENT:
-            continue
-
-        if volume < VOLUME_MIN:
-            continue
-
-        if rel_vol < REL_VOL_MIN:
-            continue
-
-        change_diff = ""
-        last_change = last_seen_change.get(symbol)
-        if last_change is not None:
-            delta = percent_change - last_change
-            if abs(delta) > 1:
-                change_diff = f" (Δ {delta:+.1f}%)"
-
-        last_seen_change[symbol] = percent_change
-
-        msg = (
-    f"🔥 ${symbol} ALERT @ {now_str}\n"
-    f"Price: ${price:.2f} | Prev Close: ${prev_close:.2f}\n"
-    f"Change: {percent_change:.1f}%{change_diff}\n"
-    f"Volume: {volume:,} | Rel Vol: {rel_vol:.2f}\n"
-    f"Market Cap: ${cap:.0f}M"
-)
-
-        found_stocks.append(msg)
-
-    if found_stocks:
-        send_telegram_message(f"🔍 Pre-market Scan @ {now_str}\n\n" + "\n\n".join(found_stocks))
-    else:
-        send_telegram_message(f"🔍 Pre-market Scan @ {now_str}: No stocks found.")
-
-
-@app.route("/")
-def home():
-    return "Pre-market scanner online."
-
-
-@app.route("/scan")
-def scan():
-    scan_and_alert()
-    return "Scan completed."
-
-
-if __name__ == '__main__':
-    def ping_self():
-        while True:
+        for row in rows[:25]:  # Only top 25
+            cols = row.find_all("td")
             try:
-                requests.get("https://premarket-stock-alerts.onrender.com/scan")
-            except:
-                pass
-            time.sleep(600)  # every 10 minutes
+                symbol = cols[0].text.strip()
+                name = cols[1].text.strip()
+                last_price = cols[2].text.strip()
+                change_percent = cols[4].text.strip()
+                volume = cols[5].text.strip()
 
-    threading.Thread(target=ping_self).start()
-    app.run(host="0.0.0.0", port=10000)
+                match = re.search(r"([+-]?[0-9.]+)%", change_percent)
+                if match and float(match.group(1)) >= 10:
+                    results.append(f"*{symbol}* ({name})\nPrice: ${last_price} | Change: {change_percent} | Vol: {volume}")
+            except Exception as e:
+                continue  # Skip malformed rows
+
+        if results:
+            message = f"🚀 *Top Pre-market Gainers (10%+)*\n{datetime.datetime.now(eastern).strftime('%Y-%m-%d %H:%M %Z')}\n\n"
+            message += "\n\n".join(results)
+        else:
+            message = "⚠️ No stocks found with 10%+ gain in pre-market right now."
+
+        send_telegram(message)
+
+    except Exception as e:
+        send_telegram(f"[ERROR] Exception during scrape: {e}")
+
+if __name__ == "__main__":
+    now = datetime.datetime.now(eastern)
+    if now.hour >= 4 and (now.hour < 9 or (now.hour == 9 and now.minute < 30)):
+        scrape_tradingview()
+    else:
+        print("Outside pre-market hours.")
