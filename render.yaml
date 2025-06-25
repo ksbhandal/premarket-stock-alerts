@@ -1,7 +1,1 @@
-services:
-  - type: web
-    name: PennyStockScreenerWeb
-    env: python
-    buildCommand: ""
-    startCommand: "python premarket_alert.py"
-    plan: free
+
